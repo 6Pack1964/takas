@@ -1,0 +1,270 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import chainer
+from chainer import cuda, Function, Variable, optimizers, serializers, utils
+from chainer import Link, Chain, ChainList
+import chainer.functions as F
+import chainer.links as L
+import time
+import pyodbc
+
+
+def createdata(sic,sqltype):
+
+    connection_string = ('Driver={SQL Server Native Client 11.0};'
+                         'Server=MSI\SQLEXPRESS;Database=xlabpy;'
+                         'Trusted_Connection=yes;')
+    connection = pyodbc.connect(connection_string)
+   
+    if sqltype=='Comp':
+        sql = 'SELECT [SIC],[Data1],[Data2],[TargetData],[NextPeriod] ' \
+                'FROM [dbo].[dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_Train]' \
+                'where [SIC]=? order by [SIC_Order]'
+    else:            
+        sql = 'SELECT [SIC],[Data1_Digit],[Data2_Digit],[TargetData_Digit],[NextPeriod] ' \
+                'FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_Train]' \
+                'where Digit_Code=? order by Serial'
+
+    cur = connection.cursor()
+    cur.execute(sql, sic)
+    
+    rows = cur.fetchall()
+    
+    for row in rows:
+        #1と２が訓練データ、３が教師データ
+      xData.append((row[1],row[2]))
+      yData.append([row[3]])                                                                           
+#      TargetPeriod.append(row[4])
+    cur.close()
+    connection.close()
+
+def getRecordCnt(sic,sqltype):
+
+    RecordCnt=0
+    
+    connection_string = ('Driver={SQL Server Native Client 11.0};'
+                         'Server=MSI\SQLEXPRESS;Database=xlabpy;'
+                         'Trusted_Connection=yes;')
+    connection = pyodbc.connect(connection_string)
+   
+    if sqltype=='Comp':
+        sql = 'SELECT Cnt=Count([SIC]) FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_Train] ' \
+                'where SIC=?'
+    else:            
+        sql = 'SELECT Cnt=Count([Digit_Code]) FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_Train] ' \
+                'where [Digit_Code]=?'
+
+    cur = connection.cursor()
+    cur.execute(sql, sic)
+    
+    rows = cur.fetchone() 
+    RecordCnt = rows.Cnt
+    
+    cur.close()
+    connection.close()
+    return RecordCnt
+    
+
+class MyLSTM(chainer.Chain):
+    def __init__(self, h_layer):
+        super(MyLSTM, self).__init__()
+        with self.init_scope():
+            self.l1 = L.Linear(1, h_layer)
+            self.l2 = L.LSTM(h_layer, h_layer)            
+            self.l3 = L.Linear(h_layer, 1)
+
+
+    def __call__(self, x, t):
+        with chainer.using_config('train',True),\
+             chainer.using_config('autotune',True):
+         
+            self.reset_state()
+                
+            cnt = 0
+            for i in x:
+                #xはばらすのでここでバリアブル型にする
+                x_in = Variable(xp.array([[x[cnt]]], xp.float32))
+                _h = self.l1(x_in)
+                h = self.l2(_h)
+                cnt += 1
+            y = self.l3(h)
+            loss = F.mean_squared_error(y,t),y
+
+            return loss
+
+    def reset_state(self):
+        #LSTM層のメモリの初期化
+        self.l2.reset_state()
+
+if __name__=='__main__':
+
+    start = time.time()
+    SICList = [40,51,52,53,54,61,62,70]    
+    for Z in range(len(SICList)):
+        
+        SIC=SICList[Z]
+        #Ratio  /   UpDown
+        Target_sql='Digit_'+str(SICList[Z])
+    
+        xData=[]
+        yData=[]
+        RecordCnt=0
+        input_x=[]
+        corect_t=[]
+        guessed_y=[]
+        t=0
+        loss_result=[]
+        loss_epoch=[]
+        shuffle_num=[]
+    
+        h_layer=128
+        
+        
+        model = MyLSTM(h_layer)
+    
+        gpu=1
+    
+        if gpu>=1:
+            xp = cuda.cupy
+        else:
+            xp=np
+        
+        if gpu>=1:
+             cuda.get_device(0).use()
+             model.to_gpu()
+    
+    
+        optfunc='Adam'
+    #    optimizer = optimizers.MomentumSGD()
+    #    optimizer = optimizers.AdaGrad()
+        optimizer = optimizers.Adam()
+        optimizer.setup(model)
+        #荷重減衰による正則化を設定
+    #    model.l1.W.update_rule.add_hook(chainer.optimizer.WeightDecay(0.0001))
+    #    model.l1.W.update_rule.hyperparam.lr = 10.0
+    #    optimizer.add_hook(chainer.optimizer.WeightDecay(0.0001))
+    #    optimizer.add_hook(chainer.optimizer.GradientClipping(5.0))
+    
+        model.accum_loss=0
+    
+        RecordCnt=getRecordCnt(SIC,Target_sql)
+    
+    #    if RecordCnt<20:
+    #        EPOCH = min(RecordCnt*40,500)
+    #    elif RecordCnt<=50:
+    #        EPOCH = min(RecordCnt*20,500)
+    #    else:
+    #        EPOCH = 1000
+    
+        minbatch = int(RecordCnt * 0.5)
+        EPOCH = max(int(RecordCnt * 0.5), 1000)
+#        minbatch = 500
+#        EPOCH = 100
+    
+    #    EPOCH = min(RecordCnt * 10, 1000)
+    
+        print('RecordCnt:{0}'.format(RecordCnt))
+        print('minbatch:{0}'.format(minbatch))
+        print('EPOCH:{0}'.format(EPOCH))
+    
+        createdata(SIC,Target_sql)
+        
+        Real_num=[]
+        for epoch in range(EPOCH):
+    
+            Real_num=[]
+            accume_loss=0    
+            shuffle_num=[]
+            [shuffle_num.append(q) for q in range(len(xData))]
+            shuffle_num = np.random.permutation(shuffle_num)
+            Real_num = shuffle_num[:minbatch]
+            for i in Real_num:
+    
+                x_data =xData[i]
+                y_data = Variable(xp.array([yData[i]], xp.float32))
+                loss,t= model(x_data, y_data)
+    #            print(model.l2.c)          #メモリセル
+    #            print(model.l2.h)           #前回出力
+    #            print(model.l2.lateral)     #lateral(メモリ先のみ)
+    #            print(model.l2.lateral.W)   #lateralのW
+    #            print(model.l2.lateral.b)   #lateralのb（ラテラルにはバイアスはないのでNone
+    #            print(model.l2.upward.out_size)      #upward(メモリ先のみ)
+    #            print(model.l2.upward.W)    #upwardのW
+    #            print(model.l2.upward.b)    #upwardのb
+                
+                accume_loss +=loss.data
+    
+                if i==Real_num[-1]:
+                    corect_t.append(yData[i][0])
+                    guessed_y.append(t.data[0][0])
+                    input_x.append(xData[i][1]-xData[i][0])
+                    loss_result.append(loss.data)
+                    loss_epoch.append(epoch)
+                    if epoch==0:
+                        Lst_accumeloss=accume_loss                    
+                    else:
+                        print('epoch:{0}'.format(epoch + 1)+'\t'+str(loss.data))
+                        elapsed = time.time() - start
+                        print('elapsed_Time：{0}'.format(round(elapsed,5))+ '[sec]')
+                        if accume_loss<Lst_accumeloss:
+                            Lst_accumeloss=accume_loss
+                            outfile = r'model\{0}'.format(SIC) +'_LSTM.model'
+                            serializers.save_npz(outfile,model)
+    #                        print('Lowest:{0}'.format(epoch-1)+'\t'+str(accume_loss))
+                    
+                model.cleargrads()
+                loss.backward()
+                optimizer.update()
+                
+        outfile = r'model\{0}'.format(SIC) +'_LSTMLst.model'
+        serializers.save_npz(outfile,model)
+    #    print('Last:{0}'.format(epoch + 1)+'\t'+str(loss.data))
+    
+    
+        elapsed = time.time() - start
+        print('elapsed_TotalTime：{0}'.format(round(elapsed,5))+ '[sec]')
+        #最小損失
+        min_loss=loss_result[(np.argmin(loss_result))]
+        minmum_epoch=loss_epoch[(np.argmin(loss_result))]
+        print('min_loss:{0}\tmin_epoch:{1}'.format(min_loss,minmum_epoch))
+        
+        import matplotlib.pyplot as plt
+    #    from pylab import rcParams
+    
+        
+        fig, (f1, f2, f3) = plt.subplots(nrows=3)
+    #    fig = plt.figure(figsize=(10,10),dpi=200)
+        
+        #縦×横単位：インチ
+    #    plt.rcParams['figure.figsize'] =[350/25.4, 210/25.4]#A4想定
+        plt.rcParams['figure.figsize'] = (20.0, 15.0)
+        plt.rcParams['font.family']='DejaVu Sans'
+        f3.set_yscale('log')
+        f1.set_title('Target_Graph')
+        f2.set_title('Guessed_Graph')
+        f3.set_title('loss')
+    #    f1.set_ylim(ymin=-1)
+    #    f1.set_ylim(ymax=1.2)
+    #    f2.set_ylim(ymin=-1)
+    #    f2.set_ylim(ymax=1.2)
+    #    f1.set_xlabel('Epoch')
+    #    f2.set_xlabel('Epoch')
+        f1.set_ylabel('t')
+        f2.set_ylabel('y')
+        f3.set_ylabel('loss')
+        f1.grid(True)
+        f2.grid(True)
+        f3.grid(True)
+        
+    #    plt.xscale('log')
+        f1.scatter(input_x,corect_t, label='corect_t')
+        f2.scatter(input_x,guessed_y, label='guessed_y')
+        f3.plot(loss_result)
+        
+    #    plt.plot(tData)
+    #    plt.plot(outData)
+    #    fig.show()
+        fig.savefig(r'evaluation\Train\{0}_{1}_{2}_{3}'.format(SIC,h_layer,EPOCH,optfunc)+'.png')
+    #    fig.clear()
