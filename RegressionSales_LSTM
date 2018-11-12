@@ -25,9 +25,12 @@ def createdata_Plus(sic,sqltype,db):
                 'FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_train] ' \
                 'where [SIC]=? order by [SIC_Order]'
     else:            
+#        sql = 'SELECT [SIC],[Data1_Digit],[Data2_Digit],[TargetData_Digit],[NextPeriod],[ThisPeriodSales],[NextPeriodSales] ' \
+#                'FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_train] ' \
+#                'where [Digit_Code]=? and [ThisPeriodSales]<[NextPeriodSales] order by [Serial]'
         sql = 'SELECT [SIC],[Data1_Digit],[Data2_Digit],[TargetData_Digit],[NextPeriod],[ThisPeriodSales],[NextPeriodSales] ' \
                 'FROM [dbo].[V_MLlab_Estimate_SalesGrowthRatio_stndrdztn2python_train] ' \
-                'where [Digit_Code]=? and [ThisPeriodSales]<[NextPeriodSales] order by [Serial]'
+                'where [Digit_Code]=? order by [Serial]'
 
     cur = connection.cursor()
     cur.execute(sql, sic)
@@ -176,7 +179,7 @@ if __name__=='__main__':
     70	ThisPeriod  SalesDigit>=7        
     #'Comp':個別 'Digit'：今期売上高桁数：
     '''
-    db = r'MSI\SQLEXPRESS'
+    db = r'EDDB1P'
 #    db = r'EDDB1P'
     Target_sql='Digit'
     SIC=40##53
@@ -201,7 +204,7 @@ if __name__=='__main__':
     #データ取得
 #    createdata(SIC,Target_sql,db)
     createdata_Plus(SIC,Target_sql,db)
-    createdata_Minus(SIC,Target_sql,db)
+#    createdata_Minus(SIC,Target_sql,db)
 
 #    EPOCH = max(int(RecordCnt * 0.5), 500)
 
@@ -300,11 +303,9 @@ if __name__=='__main__':
                 #パラメータを更新（ミニバッチごと）
                 if i == shuffle_num[-1] and m == 0:
                     model.loss_calc(len(shuffle_num),0)
-                elif i == shuffle_num[-1] and m >0 and m % 10 == 0:
+                elif i == shuffle_num[-1] and m >0 and (m+1) % 10 == 0:
                     model.loss_calc(len(shuffle_num),1)
-                elif i == shuffle_num[-1] and (m > 0 and m % 10 > 0): 
-                    model.loss_calc(len(shuffle_num),0)
-                else:
+                elif i == shuffle_num[-1] and (m > 0 and (m+1) % 10 > 0): 
                     model.loss_calc(len(shuffle_num),0)
                    
             #イテレータ終了    
@@ -321,7 +322,7 @@ if __name__=='__main__':
         loss_epoch.append(epoch+1)
 
         #バッチ終了
-        
+        #増収・減収を分けているとき、偶数にするとすべて減収データになるので、9にしている
         if epoch>0 and ((epoch + 1) % 9 ==0 or epoch == (EPOCH - 1)):
             print('epoch:{0}'.format(epoch + 1)+'\tAvg_loss:'+ \
                   str(accume_loss/(float(len(shuffle_num))*float(len(minbatchlist)))))
